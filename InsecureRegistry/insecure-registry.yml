@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  labels:
+    app: insecure-registry-setup
+  name: insecure-registry-setup
+spec:
+  selector:
+    matchLabels:
+      app: insecure-registry-setup
+  template:
+    metadata:
+      labels:
+        app: insecure-registry-setup
+    spec:
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\system"
+      hostNetwork: true
+      initContainers:
+        - name: configure-toml
+          image: mcr.microsoft.com/powershell:lts-nanoserver-1809
+          command: ["powershell","-File","%CONTAINER_SANDBOX_MOUNT_POINT%/registry.ps1"]
+          volumeMounts:
+          - name: registry-script
+            mountPath: /registry.ps1
+            subPath: registry.ps1
+      containers:
+      - name: sleep
+        image: mcr.microsoft.com/oss/kubernetes/windows-pause-image-base:v0.2
+      nodeSelector:
+        kubernetes.io/os: windows
+      volumes:
+      - name: registry-script
+        configMap:
+          name: registry-config
+---
+apiVersion: v1
+data:
+  registry.ps1: |-
+    $filePath = "C:\Program Files\containerd\config.toml"
+    $oldLine1 = "    [plugins.cri.registry]"
+    $newLines1 = @(
+        "    [plugins.cri.registry]`n",
+        "     [plugins.cri.registry.configs]`n",
+        '       [plugins.cri.registry.configs."10.0.2.71:5000".tls]',
+        "`n",
+        "         insecure_skip_verify = true`n",
+        '       [plugins.cri.registry.configs."10.0.2.71:5000".auth]',
+        "`n",
+        "         username = test`n",
+        "         password = test1234"
+    )
+
+    $oldLine2 = "      [plugins.cri.registry.mirrors]"
+    $newLines2 = @(
+        "      [plugins.cri.registry.mirrors]`n",
+        '       [plugins.cri.registry.mirrors."10.0.2.71:5000"]',
+        "`n",
+        '         endpoint = ["http://10.0.2.71:5000"]'
+    )
+
+    $content = Get-Content $filePath
+    $content = $content -replace [regex]::Escape($oldLine1), $newLines1 -join "`n"
+    $content = $content -replace [regex]::Escape($oldLine2), $newLines2 -join "`n"
+
+    $content | Set-Content $filePath
+    
+    Restart-Service containerd -ErrorAction SilentlyContinue
+kind: ConfigMap
+metadata:
+  labels:
+    app: registry-config
+  name: registry-config
+  namespace: default
